@@ -2,8 +2,10 @@
 import { act, render, screen, waitFor } from "@testing-library/react"
 import { Cause, Effect, Latch, Layer, ServiceMap } from "effect"
 import * as Schema from "effect/Schema"
+import * as Machine from "effect/unstable/machine/Machine"
 import * as AsyncResult from "effect/unstable/reactivity/AsyncResult"
 import * as Atom from "effect/unstable/reactivity/Atom"
+import * as AtomMachine from "effect/unstable/reactivity/AtomMachine"
 import * as AtomRegistry from "effect/unstable/reactivity/AtomRegistry"
 import * as Hydration from "effect/unstable/reactivity/Hydration"
 import * as React from "react"
@@ -11,7 +13,15 @@ import { Suspense } from "react"
 import { renderToString } from "react-dom/server"
 import { ErrorBoundary } from "react-error-boundary"
 import { beforeEach, describe, expect, it, test, vi } from "vitest"
-import { HydrationBoundary, RegistryContext, RegistryProvider, useAtomSuspense, useAtomValue } from "../src/index.ts"
+import {
+  HydrationBoundary,
+  RegistryContext,
+  RegistryProvider,
+  useAtom,
+  useAtomSet,
+  useAtomSuspense,
+  useAtomValue
+} from "../src/index.ts"
 import * as ScopedAtom from "../src/ScopedAtom.ts"
 
 describe("atom-react", () => {
@@ -134,6 +144,73 @@ describe("atom-react", () => {
       )
 
       expect(screen.getByTestId("loading")).toBeInTheDocument()
+    })
+  })
+
+  describe("AtomMachine", () => {
+    class Increment extends Schema.TaggedClass<Increment, { readonly _: unique symbol }>()(
+      "Increment",
+      {}
+    ) {}
+
+    class Counter extends Schema.TaggedClass<Counter, { readonly _: unique symbol }>()(
+      "Counter",
+      { count: Schema.Number }
+    ) {}
+
+    const counterMachine = Machine.make({
+      events: [Increment],
+      initial: () => new Counter({ count: 0 }),
+      states: [Counter]
+    }).handlers("Counter")({
+      Increment: ({ state }) => new Counter({ count: state.count + 1 })
+    })
+
+    test("integrates with useAtom", async () => {
+      const atom = AtomMachine.make(counterMachine)
+
+      function TestComponent() {
+        const [result, send] = useAtom(atom)
+
+        React.useEffect(() => {
+          send(new Increment({}))
+        }, [send])
+
+        return (
+          <div data-testid="machine-count">
+            {AsyncResult.isSuccess(result) ? result.value.count : "pending"}
+          </div>
+        )
+      }
+
+      render(<TestComponent />)
+
+      await waitFor(() => {
+        expect(screen.getByTestId("machine-count")).toHaveTextContent("1")
+      })
+    })
+
+    test("integrates with promise mode writes", async () => {
+      const atom = AtomMachine.make(counterMachine)
+
+      function TestComponent() {
+        const send = useAtomSet(atom, { mode: "promise" })
+        const [resolved, setResolved] = React.useState("pending")
+
+        React.useEffect(() => {
+          void send(new Increment({})).then((snapshot) => {
+            setResolved(String(snapshot.count))
+          })
+        }, [send])
+
+        return <div data-testid="machine-promise">{resolved}</div>
+      }
+
+      render(<TestComponent />)
+
+      await waitFor(() => {
+        expect(screen.getByTestId("machine-promise")).toHaveTextContent("1")
+      })
     })
   })
 
