@@ -1,6 +1,6 @@
+import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
 import * as Schema from "effect/Schema"
-import * as Context from "effect/Context"
 import * as Machine from "effect/unstable/machine/Machine"
 import { describe, expect, it } from "tstyche"
 
@@ -93,7 +93,7 @@ describe("Machine", () => {
     })
   })
 
-  it("does not infer deferred requirements from plain effectful handlers", () => {
+  it("does not infer deferred requirements from plain handlers", () => {
     class Create extends Schema.TaggedClass<Create, { readonly _: unique symbol }>()(
       "Create",
       { email: Schema.String }
@@ -114,7 +114,7 @@ describe("Machine", () => {
       initial: () => new Uncreated({}),
       states: [Uncreated, Created]
     }).handlers("Uncreated")({
-      Create: ({ event }) => Effect.succeed(new Created({ email: event.email }))
+      Create: ({ event }) => new Created({ email: event.email })
     })
 
     expect<Machine.DeferredErrorOf<typeof machine>>().type.toBe<never>()
@@ -255,11 +255,10 @@ describe("Machine", () => {
       initial: () => new Idle({}),
       states: [Idle]
     }).handlers("Idle")({
-      Create: () =>
-        Effect.gen(function*() {
-          yield* Machine.defer(DeferredDependency.use((deferred) => deferred.emit))
-          return new Idle({})
-        })
+      Create: (_, actions: Machine.ActionQueue<DeferredError, DeferredDependency>) => {
+        actions.effect(DeferredDependency.use((deferred) => deferred.emit))
+        return new Idle({})
+      }
     })
 
     const planned = Machine.plan(machine, Machine.initial(machine), new Create({}))
@@ -271,7 +270,16 @@ describe("Machine", () => {
     expect<Machine.ErrorOf<typeof machine>>().type.toBe<DeferredError>()
     expect<Machine.ServicesOf<typeof machine>>().type.toBe<DeferredDependency>()
     expect<typeof planned>().type.toBe<
-      Effect.Effect<Machine.Plan<Machine.StateSchemasOf<typeof machine>, typeof machine.event, Idle>, Machine.UnhandledEventError>
+      Effect.Effect<
+        Machine.Plan<
+          Machine.StateSchemasOf<typeof machine>,
+          typeof machine.event,
+          Idle,
+          DeferredError,
+          DeferredDependency
+        >,
+        Machine.UnhandledEventError
+      >
     >()
   })
 })

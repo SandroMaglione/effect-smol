@@ -84,7 +84,7 @@ describe("Machine", () => {
     states: [Uncreated, Created, Deleted]
   })
     .handlers("Uncreated")({
-      Create: ({ event }) => Effect.succeed(new Created({ user: { id: "user-1", email: event.email } }))
+      Create: ({ event }) => new Created({ user: { id: "user-1", email: event.email } })
     })
     .handlers("Created")({
       Rename: ({ state, event }) => new Created({ user: { ...state.user, email: event.email } }),
@@ -274,20 +274,18 @@ describe("Machine", () => {
         initial: () => new Uncreated({}),
         states: [Uncreated, Created]
       }).handlers("Uncreated")({
-        Create: Effect.fn(function*() {
-            const log = yield* DeferredLog
-            yield* Machine.defer(log.push("created"))
-            return new Created({ user: { id: "user-1", email: "a@example.com" } })
-          })
+        Create: (_, actions) => {
+          actions.effect(DeferredLog.use((log) => log.push("created")))
+          return new Created({ user: { id: "user-1", email: "a@example.com" } })
+        }
       })
 
       const log = yield* makeDeferredLog
       const initial = Machine.initial(DeferredMachine)
-      const planned = yield* Machine.plan(DeferredMachine, initial, new Create({ email: "a@example.com" })).pipe(
-        Effect.provideService(DeferredLog, log)
-      )
+      const planned = yield* Machine.plan(DeferredMachine, initial, new Create({ email: "a@example.com" }))
 
       assert.instanceOf(planned.next, Created)
+      assert.strictEqual(planned.actions.length, 1)
       assert.deepStrictEqual(yield* log.read, [])
     }))
 
@@ -298,11 +296,10 @@ describe("Machine", () => {
         initial: () => new Uncreated({}),
         states: [Uncreated, Created]
       }).handlers("Uncreated")({
-        Create: Effect.fn(function*() {
-            const log = yield* DeferredLog
-            yield* Machine.defer(log.push("created"))
-            return new Created({ user: { id: "user-1", email: "a@example.com" } })
-          })
+        Create: (_, actions) => {
+          actions.effect(DeferredLog.use((log) => log.push("created")))
+          return new Created({ user: { id: "user-1", email: "a@example.com" } })
+        }
       })
 
       const log = yield* makeDeferredLog
@@ -322,10 +319,10 @@ describe("Machine", () => {
         initial: () => new Uncreated({}),
         states: [Uncreated, Created]
       }).handlers("Uncreated")({
-        Create: Effect.fn(function*() {
-            yield* Machine.defer(Effect.fail("boom"))
-            return new Created({ user: { id: "user-1", email: "a@example.com" } })
-          })
+        Create: (_, actions: Machine.ActionQueue<string>) => {
+          actions.effect(Effect.fail("boom"))
+          return new Created({ user: { id: "user-1", email: "a@example.com" } })
+        }
       })
 
       const actor = yield* Machine.start(DeferredMachine)
