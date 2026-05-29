@@ -102,7 +102,7 @@ export type Handler<
   R = never
 > = (
   args: HandlerArgs<EventSchema, StateSchemas, Source, Tag>,
-  actions: ActionQueue<E, R>
+  actions: ActionQueue<E, R, EventSchema>
 ) => Transition<StateSchemas>
 
 /**
@@ -126,7 +126,7 @@ type HandlerDefinitions<
 > = {
   readonly [Tag in EventTag<EventSchema>]?: (
     args: HandlerArgs<EventSchema, StateSchemas, Scope, Tag>,
-    actions: ActionQueue<any, any>
+    actions: ActionQueue<any, any, any>
   ) => Transition<StateSchemas>
 }
 
@@ -136,7 +136,15 @@ type HandlerUnion<HandlersDef extends Record<string, any>> = Exclude<HandlersDef
  * @since 4.0.0
  * @category models
  */
-export interface Action<E = never, R = never> {
+export type Action<E = never, R = never, EventSchema extends AnyEventSchema = AnyEventSchema> =
+  | EffectAction<E, R>
+  | RaiseAction<EventSchema>
+
+/**
+ * @since 4.0.0
+ * @category models
+ */
+export interface EffectAction<E = never, R = never> {
   readonly _tag: "Effect"
   readonly effect: Effect.Effect<void, E, R>
 }
@@ -145,8 +153,18 @@ export interface Action<E = never, R = never> {
  * @since 4.0.0
  * @category models
  */
-export interface ActionQueue<E = never, R = never> {
+export interface RaiseAction<EventSchema extends AnyEventSchema = AnyEventSchema> {
+  readonly _tag: "Raise"
+  readonly event: Event<EventSchema>
+}
+
+/**
+ * @since 4.0.0
+ * @category models
+ */
+export interface ActionQueue<E = never, R = never, EventSchema extends AnyEventSchema = AnyEventSchema> {
   readonly effect: <A, E2 extends E, R2 extends R>(effect: Effect.Effect<A, E2, R2>) => void
+  readonly raise: (event: Event<EventSchema>) => void
 }
 
 type IsAny<T> = 0 extends 1 & T ? true : false
@@ -182,7 +200,7 @@ export interface Plan<
   readonly snapshot: Source
   readonly event: Event<EventSchema>
   readonly next: Snapshot<StateSchemas>
-  readonly actions: ReadonlyArray<Action<E, R>>
+  readonly actions: ReadonlyArray<Action<E, R, EventSchema>>
   readonly changed: boolean
 }
 
@@ -236,6 +254,21 @@ export class UnhandledEventError extends Schema.TaggedErrorClass<UnhandledEventE
     event: Schema.String
   }
 ) {}
+
+/**
+ * @since 4.0.0
+ * @category errors
+ */
+export class InternalEventLoopError
+  extends Schema.TaggedErrorClass<InternalEventLoopError, { readonly _: unique symbol }>()(
+    "InternalEventLoopError",
+    {
+      machineId: Schema.optional(Schema.String),
+      event: Schema.String,
+      maxIterations: Schema.Number
+    }
+  )
+{}
 
 /**
  * @since 4.0.0
@@ -332,7 +365,7 @@ export type PlanServicesOf<M extends Any> = ImmediateServicesOf<M>
  * @since 4.0.0
  * @category models
  */
-export type MachineErrorOf<M extends Any> = ErrorOf<M> | UnhandledEventError
+export type MachineErrorOf<M extends Any> = ErrorOf<M> | UnhandledEventError | InternalEventLoopError
 
 /**
  * @since 4.0.0
@@ -452,20 +485,26 @@ interface EvaluatedPlan<
   DeferredR = never
 > {
   readonly plan: Plan<StateSchemas, EventSchema, Source, DeferredE, DeferredR>
-  readonly actions: ReadonlyArray<Action<DeferredE, DeferredR>>
+  readonly actions: ReadonlyArray<Action<DeferredE, DeferredR, EventSchema>>
 }
 
-const makeActionQueue = <E, R>(): readonly [
-  queue: ActionQueue<E, R>,
-  read: () => ReadonlyArray<Action<E, R>>
+const makeActionQueue = <EventSchema extends AnyEventSchema, E, R>(): readonly [
+  queue: ActionQueue<E, R, EventSchema>,
+  read: () => ReadonlyArray<Action<E, R, EventSchema>>
 ] => {
-  const actions: Array<Action<E, R>> = []
+  const actions: Array<Action<E, R, EventSchema>> = []
   return [
     {
       effect: (effect) => {
         actions.push({
           _tag: "Effect",
           effect: Effect.asVoid(effect)
+        })
+      },
+      raise: (event) => {
+        actions.push({
+          _tag: "Raise",
+          event
         })
       }
     },
@@ -475,9 +514,22 @@ const makeActionQueue = <E, R>(): readonly [
 
 const runActions = <E, R>(
   actions: ReadonlyArray<Action<E, R>>
-): Effect.Effect<void, E, R> => Effect.forEach(actions, (action) => action.effect, { discard: true })
+): Effect.Effect<void, E, R> =>
+  Effect.forEach(actions, (action) => action._tag === "Effect" ? action.effect : Effect.void, { discard: true })
 
-const evaluate = <
+const raisedEvents = <EventSchema extends AnyEventSchema>(
+  actions: ReadonlyArray<Action<any, any, EventSchema>>
+): ReadonlyArray<Event<EventSchema>> => {
+  const events: Array<Event<EventSchema>> = []
+  for (const action of actions) {
+    if (action._tag === "Raise") {
+      events.push(action.event)
+    }
+  }
+  return events
+}
+
+const evaluateStep = <
   M extends Any,
   Source extends Snapshot<StateSchemasOf<M>>
 >(
@@ -515,7 +567,7 @@ const evaluate = <
         })
       )
     }
-    const [actions, readActions] = makeActionQueue<DeferredErrorOf<M>, DeferredServicesOf<M>>()
+    const [actions, readActions] = makeActionQueue<M["event"], DeferredErrorOf<M>, DeferredServicesOf<M>>()
     const next = handler({
       state: current as any,
       event: currentEvent as any
@@ -533,6 +585,58 @@ const evaluate = <
     }
   })
 
+const MaxInternalTransitions = 1000
+
+const evaluate = <
+  M extends Any,
+  Source extends Snapshot<StateSchemasOf<M>>
+>(
+  self: M,
+  snapshot: Source,
+  event: Event<M["event"]>
+): Effect.Effect<
+  EvaluatedPlan<StateSchemasOf<M>, M["event"], Source, DeferredErrorOf<M>, DeferredServicesOf<M>>,
+  UnhandledEventError | InternalEventLoopError | PlanErrorOf<M>,
+  PlanServicesOf<M>
+> =>
+  Effect.gen(function*() {
+    const source = snapshot as Source
+    let current = source as Snapshot<StateSchemasOf<M>>
+    const internalQueue: Array<Event<M["event"]>> = [event]
+    const actions: Array<Action<DeferredErrorOf<M>, DeferredServicesOf<M>, M["event"]>> = []
+    let index = 0
+    let iterations = 0
+
+    while (index < internalQueue.length) {
+      if (iterations >= MaxInternalTransitions) {
+        return yield* Effect.fail(
+          new InternalEventLoopError({
+            machineId: self.id,
+            event: (event as { readonly _tag: string })._tag,
+            maxIterations: MaxInternalTransitions
+          })
+        )
+      }
+      iterations++
+      const currentEvent = internalQueue[index++]!
+      const evaluated = yield* evaluateStep(self, current as any, currentEvent)
+      current = evaluated.plan.next
+      actions.push(...evaluated.actions)
+      internalQueue.push(...raisedEvents(evaluated.actions))
+    }
+
+    return {
+      plan: {
+        snapshot: source,
+        event,
+        next: current,
+        actions,
+        changed: current !== source
+      },
+      actions
+    }
+  })
+
 /**
  * @since 4.0.0
  * @category constructors
@@ -546,7 +650,7 @@ export const plan = <
   event: Event<M["event"]>
 ): Effect.Effect<
   Plan<StateSchemasOf<M>, M["event"], Source, DeferredErrorOf<M>, DeferredServicesOf<M>>,
-  UnhandledEventError | PlanErrorOf<M>,
+  UnhandledEventError | InternalEventLoopError | PlanErrorOf<M>,
   PlanServicesOf<M>
 > => Effect.map(evaluate(self, snapshot, event), (_) => _.plan)
 

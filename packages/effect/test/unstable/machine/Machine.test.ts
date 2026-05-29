@@ -267,6 +267,36 @@ describe("Machine", () => {
       assert.deepStrictEqual(Machine.enabled(RefreshMachine, initial), ["Refresh", "Logout"])
     }))
 
+  it.effect("processes raised events as internal transitions", () =>
+    Effect.gen(function*() {
+      const RaisedMachine = Machine.make({
+        events: [Create, Rename],
+        initial: () => new Uncreated({}),
+        states: [Uncreated, Created]
+      })
+        .handlers("Uncreated")({
+          Create: (_, actions) => {
+            actions.raise(new Rename({ email: "raised@example.com" }))
+            return new Created({ user: { id: "user-1", email: "created@example.com" } })
+          }
+        })
+        .handlers("Created")({
+          Rename: ({ state, event }) => new Created({ user: { ...state.user, email: event.email } })
+        })
+
+      const initial = Machine.initial(RaisedMachine)
+      const planned = yield* Machine.plan(RaisedMachine, initial, new Create({ email: "create@example.com" }))
+      const next = yield* Machine.next(RaisedMachine, initial, new Create({ email: "create@example.com" }))
+
+      assert.instanceOf(planned.next, Created)
+      assert.strictEqual(planned.next.user.email, "raised@example.com")
+      assert.strictEqual(planned.actions.length, 1)
+      assert.strictEqual(planned.actions[0]!._tag, "Raise")
+
+      assert.instanceOf(next, Created)
+      assert.strictEqual(next.user.email, "raised@example.com")
+    }))
+
   it.effect("plan does not run deferred effects", () =>
     Effect.gen(function*() {
       const DeferredMachine = Machine.make({

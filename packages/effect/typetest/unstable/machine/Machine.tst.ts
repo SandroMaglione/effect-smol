@@ -61,7 +61,9 @@ describe("Machine", () => {
     >()
     expect<Machine.DeferredServicesOf<typeof UserMachine>>().type.toBe<never>()
     const next = Machine.next(UserMachine, Machine.initial(UserMachine), new Create({ email: "a@example.com" }))
-    expect<typeof next>().type.toBe<Effect.Effect<Uncreated | Created | Deleted, Machine.UnhandledEventError>>()
+    expect<typeof next>().type.toBe<
+      Effect.Effect<Uncreated | Created | Deleted, Machine.UnhandledEventError | Machine.InternalEventLoopError>
+    >()
   })
 
   it("contextually types handlers", () => {
@@ -161,7 +163,9 @@ describe("Machine", () => {
       })
 
     expect<Machine.Event<typeof machine.event>>().type.toBe<Create | Rename>()
-    expect<Machine.MachineErrorOf<typeof machine>>().type.toBe<Machine.UnhandledEventError>()
+    expect<Machine.MachineErrorOf<typeof machine>>().type.toBe<
+      Machine.UnhandledEventError | Machine.InternalEventLoopError
+    >()
   })
 
   it("accepts schema-backed input for initial state", () => {
@@ -278,7 +282,7 @@ describe("Machine", () => {
           DeferredError,
           DeferredDependency
         >,
-        Machine.UnhandledEventError
+        Machine.UnhandledEventError | Machine.InternalEventLoopError
       >
     >()
   })
