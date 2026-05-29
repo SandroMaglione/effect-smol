@@ -585,4 +585,41 @@ describe("Machine", () => {
       assert.strictEqual(error, "boom")
       assert.instanceOf(snapshot, Created)
     }))
+
+  it.effect("starts machines with actor declarations without starting children", () =>
+    Effect.gen(function*() {
+      const ChildMachine = Machine.make({
+        id: "ChildMachine",
+        events: [Refresh],
+        initial: () => new AuthenticatedIdle({ userId: "child" }),
+        states: [AuthenticatedIdle, AuthenticatedRefreshing]
+      }).handlers("Authenticated.Idle")({
+        Refresh: ({ state }) => new AuthenticatedRefreshing({ userId: state.userId })
+      })
+
+      const ParentMachine = Machine.make({
+        id: "ParentMachine",
+        events: [Create],
+        initial: () => new Uncreated({}),
+        states: [Uncreated, Created],
+        actors: {
+          child: Machine.actor(ChildMachine)
+        }
+      }).handlers("Uncreated")({
+        Create: ({ event }) => new Created({ user: { id: "user-1", email: event.email } })
+      })
+
+      const actor = yield* Machine.start(ParentMachine)
+      yield* actor.send(new Create({ email: "a@example.com" }))
+      const snapshot = yield* actor.snapshot
+
+      assert.strictEqual(actor.id, "ParentMachine")
+      assert.strictEqual(ParentMachine.actors.child._tag, "ActorSlot")
+      assert.strictEqual(ParentMachine.actors.child.key, "child")
+      assert.instanceOf(snapshot, Created)
+      assert.deepStrictEqual(snapshot.user, {
+        id: "user-1",
+        email: "a@example.com"
+      })
+    }))
 })

@@ -412,4 +412,99 @@ describe("Machine", () => {
 
     expect<Machine.ErrorOf<typeof machine>>().type.toBe<RecoveryError>()
   })
+
+  it("preserves child machine types in actor declarations", () => {
+    class Ping extends Schema.TaggedClass<Ping, { readonly _: unique symbol }>()(
+      "Ping",
+      {}
+    ) {}
+
+    class Idle extends Schema.TaggedClass<Idle, { readonly _: unique symbol }>()(
+      "Idle",
+      {}
+    ) {}
+
+    const child = Machine.make({
+      events: [Ping],
+      initial: () => new Idle({}),
+      states: [Idle]
+    })
+
+    const logic = Machine.actor(child)
+
+    expect<typeof logic>().type.toBe<Machine.ActorLogic<typeof child>>()
+  })
+
+  it("exposes declared actor slots in handler args", () => {
+    class Ping extends Schema.TaggedClass<Ping, { readonly _: unique symbol }>()(
+      "Ping",
+      {}
+    ) {}
+
+    class Create extends Schema.TaggedClass<Create, { readonly _: unique symbol }>()(
+      "Create",
+      {}
+    ) {}
+
+    class Idle extends Schema.TaggedClass<Idle, { readonly _: unique symbol }>()(
+      "Idle",
+      {}
+    ) {}
+
+    class Done extends Schema.TaggedClass<Done, { readonly _: unique symbol }>()(
+      "Done",
+      {}
+    ) {}
+
+    const child = Machine.make({
+      events: [Ping],
+      initial: () => new Idle({}),
+      states: [Idle]
+    })
+
+    Machine.make({
+      events: [Create],
+      initial: () => new Idle({}),
+      states: [Idle, Done],
+      actors: {
+        child: Machine.actor(child)
+      }
+    }).handlers("Idle")({
+      Create: ({ actors }) => {
+        expect<typeof actors.child>().type.toBe<Machine.ActorSlot<typeof child>>()
+        return new Done({})
+      }
+    })
+  })
+
+  it("makes actors assignable to actor refs but keeps slots non-sendable", () => {
+    class Ping extends Schema.TaggedClass<Ping, { readonly _: unique symbol }>()(
+      "Ping",
+      {}
+    ) {}
+
+    class Idle extends Schema.TaggedClass<Idle, { readonly _: unique symbol }>()(
+      "Idle",
+      {}
+    ) {}
+
+    const child = Machine.make({
+      events: [Ping],
+      initial: () => new Idle({}),
+      states: [Idle]
+    })
+
+    const parent = Machine.make({
+      events: [Ping],
+      initial: () => new Idle({}),
+      states: [Idle],
+      actors: {
+        child: Machine.actor(child)
+      }
+    })
+    const acceptActorRef = (_: Machine.ActorRef<typeof child>) => {}
+
+    expect<Machine.Actor<typeof child>>().type.toBeAssignableTo<Machine.ActorRef<typeof child>>()
+    expect(acceptActorRef).type.not.toBeCallableWith(parent.actors.child)
+  })
 })
