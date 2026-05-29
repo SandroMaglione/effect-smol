@@ -12,12 +12,11 @@ import * as Queue from "../../Queue.ts"
 import * as Ref from "../../Ref.ts"
 import * as Schema from "../../Schema.ts"
 import * as SchemaAST from "../../SchemaAST.ts"
-import type * as Scope from "../../Scope.ts"
+import * as Scope from "../../Scope.ts"
 import * as Stream from "../../Stream.ts"
 import type * as Types from "../../Types.ts"
 
 const TypeId = "~effect/unstable/machine/Machine" as const
-const ActorLogicTypeId: unique symbol = Symbol.for("effect/unstable/machine/ActorLogic") as any
 const ActorSlotTypeId: unique symbol = Symbol.for("effect/unstable/machine/ActorSlot") as any
 
 type AnyTaggedEvent = Schema.Top & { readonly Type: { readonly _tag: PropertyKey } }
@@ -52,35 +51,25 @@ type Initializer<InputSchema, State> = [InputSchema] extends [undefined] ? () =>
  * @since 4.0.0
  * @category models
  */
-export interface ActorLogic<M extends Any> {
-  readonly _tag: "ActorLogic"
-  readonly machine: M
-  readonly [ActorLogicTypeId]: (_: M) => M
-}
-
-/**
- * @since 4.0.0
- * @category models
- */
 export interface ActorSlot<M extends Any> {
   readonly _tag: "ActorSlot"
   readonly key: string
-  readonly logic: ActorLogic<M>
-  readonly [ActorSlotTypeId]: (_: M) => M
+  readonly machine: M
+  readonly [ActorSlotTypeId]: M
 }
 
 /**
  * @since 4.0.0
  * @category models
  */
-export type ActorsDefinition = Record<string, ActorLogic<Any>>
+export type ActorsDefinition = Record<string, Any>
 
 /**
  * @since 4.0.0
  * @category models
  */
 export type ActorSlotsOf<Actors extends ActorsDefinition> = {
-  readonly [Key in keyof Actors]: Actors[Key] extends ActorLogic<infer M> ? ActorSlot<M> : never
+  readonly [Key in keyof Actors]: ActorSlot<Actors[Key]>
 }
 
 /**
@@ -174,7 +163,7 @@ export interface LifecycleArgs<
   Scope extends ScopesOfStates<StateSchemas>
 > {
   readonly state: ReducedSnapshot<StatesInScope<StateSchemas, Scope>>
-  readonly event: Event<EventSchema>
+  readonly event: Event<EventSchema> | undefined
   readonly actors: ActorSlotsOf<Actors>
 }
 
@@ -258,6 +247,54 @@ export type CatchCauseHandler<
   actions: ActionQueue<E2, R2, EventSchema>
 ) => Transition<StateSchemas>
 
+type InputFor<M extends Any> = InputValue<InputSchemaOf<M>>
+
+/**
+ * @since 4.0.0
+ * @category models
+ */
+export interface InvokeArgs<
+  EventSchema extends AnyEventSchema,
+  StateSchemas extends AnyStateSchemas,
+  Actors extends ActorsDefinition,
+  Scope extends ScopesOfStates<StateSchemas>
+> {
+  readonly state: ReducedSnapshot<StatesInScope<StateSchemas, Scope>>
+  readonly event: Event<EventSchema>
+  readonly actors: ActorSlotsOf<Actors>
+}
+
+type InvokeDefinitionFor<Slot extends ActorSlot<Any>> = Slot extends ActorSlot<infer M> ?
+  [InputSchemaOf<M>] extends [undefined] ? {
+      readonly actor: Slot
+      readonly input?: never
+    }
+  : {
+    readonly actor: Slot
+    readonly input: InputFor<M>
+  }
+  : never
+
+/**
+ * @since 4.0.0
+ * @category models
+ */
+export type InvokeDefinition<Actors extends ActorsDefinition> = keyof Actors extends never ? never
+  : {
+    readonly [Key in keyof Actors]: InvokeDefinitionFor<ActorSlotsOf<Actors>[Key]>
+  }[keyof Actors]
+
+/**
+ * @since 4.0.0
+ * @category models
+ */
+export type InvokeHandler<
+  EventSchema extends AnyEventSchema,
+  StateSchemas extends AnyStateSchemas,
+  Actors extends ActorsDefinition,
+  Scope extends ScopesOfStates<StateSchemas>
+> = (args: InvokeArgs<EventSchema, StateSchemas, Actors, Scope>) => InvokeDefinition<Actors>
+
 type HandlerDefinitions<
   EventSchema extends AnyEventSchema,
   StateSchemas extends AnyStateSchemas,
@@ -280,6 +317,8 @@ type LifecycleUnion<HandlersDef extends ReadonlyArray<any>> = HandlersDef[number
 export type Action<E = never, R = never, EventSchema extends AnyEventSchema = AnyEventSchema> =
   | EffectAction<E, R>
   | RaiseAction<EventSchema>
+  | StartActorAction
+  | StopActorAction
 
 /**
  * @since 4.0.0
@@ -297,6 +336,26 @@ export interface EffectAction<E = never, R = never> {
 export interface RaiseAction<EventSchema extends AnyEventSchema = AnyEventSchema> {
   readonly _tag: "Raise"
   readonly event: Event<EventSchema>
+}
+
+/**
+ * @since 4.0.0
+ * @category models
+ */
+export interface StartActorAction {
+  readonly _tag: "StartActor"
+  readonly scope: string
+  readonly slot: ActorSlot<Any>
+  readonly input: ReadonlyArray<unknown>
+}
+
+/**
+ * @since 4.0.0
+ * @category models
+ */
+export interface StopActorAction {
+  readonly _tag: "StopActor"
+  readonly scope: string
 }
 
 /**
@@ -335,6 +394,11 @@ type InferCatchError<HandlerDef> = HandlerDef extends (args: any, actions: infer
 
 type InferCatchServices<HandlerDef> = HandlerDef extends (args: any, actions: infer Queue) => any ?
   InferQueueServices<Queue>
+  : never
+
+type InferInvokeServices<HandlerDef> = HandlerDef extends (args: any) => infer Definition ?
+  Definition extends { readonly actor: ActorSlot<infer M> } ? Scope.Scope | ServicesOf<M>
+  : never
   : never
 
 type InferHandlerError<HandlersDef extends Record<string, any>> = HandlerUnion<HandlersDef> extends never ? never
@@ -400,6 +464,9 @@ export interface Machine<
       ScopesOfStates<StateSchemas>,
       ReadonlyArray<LifecycleHandler<EventSchema, StateSchemas, Actors, any, any, any>>
     >
+  >
+  readonly invokeHandlers: Partial<
+    Record<ScopesOfStates<StateSchemas>, ReadonlyArray<InvokeHandler<EventSchema, StateSchemas, Actors, any>>>
   >
   readonly handlers: <Scope extends ScopesOfStates<StateSchemas>>(
     scope: Scope
@@ -484,6 +551,22 @@ export interface Machine<
     InferLifecycleError<HandlersDef> | DeferredE,
     InferLifecycleServices<HandlersDef> | DeferredR
   >
+  readonly invoke: <
+    Scope extends ScopesOfStates<StateSchemas>,
+    HandlerDef extends InvokeHandler<EventSchema, StateSchemas, Actors, Scope>
+  >(
+    scope: Scope,
+    handler: HandlerDef
+  ) => Machine<
+    EventSchema,
+    StateSchemas,
+    InputSchema,
+    Actors,
+    E,
+    R,
+    DeferredE,
+    InferInvokeServices<HandlerDef> | DeferredR
+  >
 }
 
 /**
@@ -565,8 +648,7 @@ export type InputSchemaOf<M extends Any> = M extends Machine<any, any, infer Inp
  */
 export type InputOf<M extends Any> = InputValue<InputSchemaOf<M>>
 
-type ActorDefinitionsOf<M extends Any> = M extends Machine<any, any, any, infer Actors, any, any, any, any> ?
-  Actors
+type ActorDefinitionsOf<M extends Any> = M extends Machine<any, any, any, infer Actors, any, any, any, any> ? Actors
   : never
 
 /**
@@ -633,27 +715,17 @@ export type MachineErrorOf<M extends Any> = ErrorOf<M> | UnhandledEventError | I
  */
 export const isMachine = (u: unknown): u is Any => Predicate.hasProperty(u, TypeId)
 
-/**
- * @since 4.0.0
- * @category constructors
- */
-export const actor = <M extends Any>(machine: M): ActorLogic<M> => ({
-  _tag: "ActorLogic",
-  machine,
-  [ActorLogicTypeId]: (_) => _
-})
-
 const makeActorSlots = <Actors extends ActorsDefinition>(actors: Actors): ActorSlotsOf<Actors> => {
   const slots: Record<string, ActorSlot<Any>> = {}
   for (const key of Object.keys(actors)) {
     slots[key] = {
       _tag: "ActorSlot",
       key,
-      logic: actors[key]!,
-      [ActorSlotTypeId]: (_) => _
+      machine: actors[key]!,
+      [ActorSlotTypeId]: actors[key]!
     }
   }
-  return slots as ActorSlotsOf<Actors>
+  return slots as unknown as ActorSlotsOf<Actors>
 }
 
 const scopesOf = (tag: string): ReadonlyArray<string> => {
@@ -724,6 +796,12 @@ export const make = <
         ScopesOfStates<StateSchemasOfStates<States>>,
         ReadonlyArray<LifecycleHandler<typeof event, StateSchemasOfStates<States>, Actors, any, any, any>>
       >
+    >,
+    invokeHandlers: Partial<
+      Record<
+        ScopesOfStates<StateSchemasOfStates<States>>,
+        ReadonlyArray<InvokeHandler<typeof event, StateSchemasOfStates<States>, Actors, any>>
+      >
     >
   ): Machine<typeof event, StateSchemasOfStates<States>, InputSchema, Actors, E, R, DeferredE, DeferredR> => ({
     [TypeId]: TypeId,
@@ -739,6 +817,7 @@ export const make = <
     catchCauseHandler,
     entryHandlers: entryHandlers as any,
     exitHandlers: exitHandlers as any,
+    invokeHandlers: invokeHandlers as any,
     handlers: (scope) => (handlers) =>
       makeMachine<
         InferHandlerError<typeof handlers> | E,
@@ -753,7 +832,8 @@ export const make = <
         catchHandlers,
         catchCauseHandler,
         entryHandlers,
-        exitHandlers
+        exitHandlers,
+        invokeHandlers
       ),
     catch: (tag, handler) =>
       makeMachine<
@@ -769,7 +849,8 @@ export const make = <
         },
         catchCauseHandler,
         entryHandlers,
-        exitHandlers
+        exitHandlers,
+        invokeHandlers
       ),
     catchCause: (handler) =>
       makeMachine<
@@ -782,7 +863,8 @@ export const make = <
         {},
         handler as CatchCauseHandler<any, any, Actors, any, any, any>,
         entryHandlers,
-        exitHandlers
+        exitHandlers,
+        invokeHandlers
       ),
     entry: (scope, ...handlers) =>
       makeMachine<
@@ -790,13 +872,22 @@ export const make = <
         R,
         InferLifecycleError<typeof handlers> | DeferredE,
         InferLifecycleServices<typeof handlers> | DeferredR
-      >(scopedHandlers, catchHandlers, catchCauseHandler, {
-        ...entryHandlers,
-        [scope]: [
-          ...(entryHandlers[scope] ?? []),
-          ...handlers
-        ] as ReadonlyArray<LifecycleHandler<typeof event, StateSchemasOfStates<States>, Actors, typeof scope, any, any>>
-      }, exitHandlers),
+      >(
+        scopedHandlers,
+        catchHandlers,
+        catchCauseHandler,
+        {
+          ...entryHandlers,
+          [scope]: [
+            ...(entryHandlers[scope] ?? []),
+            ...handlers
+          ] as ReadonlyArray<
+            LifecycleHandler<typeof event, StateSchemasOfStates<States>, Actors, typeof scope, any, any>
+          >
+        },
+        exitHandlers,
+        invokeHandlers
+      ),
     exit: (scope, ...handlers) =>
       makeMachine<
         E,
@@ -809,9 +900,22 @@ export const make = <
           ...(exitHandlers[scope] ?? []),
           ...handlers
         ] as ReadonlyArray<LifecycleHandler<typeof event, StateSchemasOfStates<States>, Actors, typeof scope, any, any>>
+      }, invokeHandlers),
+    invoke: (scope, handler) =>
+      makeMachine<
+        E,
+        R,
+        DeferredE,
+        InferInvokeServices<typeof handler> | DeferredR
+      >(scopedHandlers, catchHandlers, catchCauseHandler, entryHandlers, exitHandlers, {
+        ...invokeHandlers,
+        [scope]: [
+          ...(invokeHandlers[scope] ?? []),
+          handler
+        ] as ReadonlyArray<InvokeHandler<typeof event, StateSchemasOfStates<States>, Actors, typeof scope>>
       })
   })
-  return makeMachine<never, never, never, never>({}, {}, undefined, {}, {})
+  return makeMachine<never, never, never, never>({}, {}, undefined, {}, {}, {})
 }
 
 const snapshotSchemaFromStates = <const States extends AnyStateTuple>(states: States): AnyTaggedUnion =>
@@ -893,10 +997,31 @@ const makeActionQueue = <EventSchema extends AnyEventSchema, E, R>(): readonly [
   ]
 }
 
+interface ActorRuntime {
+  readonly start: (
+    scope: string,
+    slot: ActorSlot<Any>,
+    input: ReadonlyArray<unknown>
+  ) => Effect.Effect<void, never, any>
+  readonly stop: (scope: string) => Effect.Effect<void>
+}
+
 const runActions = <E, R>(
-  actions: ReadonlyArray<Action<E, R>>
+  actions: ReadonlyArray<Action<E, R>>,
+  runtime?: ActorRuntime | undefined
 ): Effect.Effect<void, E, R> =>
-  Effect.forEach(actions, (action) => action._tag === "Effect" ? action.effect : Effect.void, { discard: true })
+  Effect.forEach(actions, (action) => {
+    switch (action._tag) {
+      case "Effect":
+        return action.effect
+      case "StartActor":
+        return runtime === undefined ? Effect.void : runtime.start(action.scope, action.slot, action.input)
+      case "StopActor":
+        return runtime === undefined ? Effect.void : runtime.stop(action.scope)
+      case "Raise":
+        return Effect.void
+    }
+  }, { discard: true }) as Effect.Effect<void, E, R>
 
 const raisedEvents = <EventSchema extends AnyEventSchema>(
   actions: ReadonlyArray<Action<any, any, EventSchema>>
@@ -939,6 +1064,52 @@ const collectLifecycleActions = <
   return readActions()
 }
 
+const collectInvokeStartActions = <
+  M extends Any,
+  Source extends Snapshot<StateSchemasOf<M>>
+>(
+  self: M,
+  scopes: ReadonlyArray<string>,
+  state: Source,
+  event: Event<M["event"]> | undefined
+): ReadonlyArray<Action<DeferredErrorOf<M>, DeferredServicesOf<M>, M["event"]>> => {
+  const actions: Array<Action<DeferredErrorOf<M>, DeferredServicesOf<M>, M["event"]>> = []
+  for (const scope of scopes) {
+    const handlers = self.invokeHandlers[scope as keyof typeof self.invokeHandlers] ?? []
+    for (const handler of handlers) {
+      const definition = handler({
+        state: state as any,
+        event,
+        actors: self.actors
+      }) as InvokeDefinition<ActorDefinitionsOf<M>>
+      actions.push({
+        _tag: "StartActor",
+        scope,
+        slot: definition.actor,
+        input: "input" in definition ? [definition.input] : []
+      })
+    }
+  }
+  return actions
+}
+
+const collectInvokeStopActions = <M extends Any>(
+  self: M,
+  scopes: ReadonlyArray<string>
+): ReadonlyArray<Action<DeferredErrorOf<M>, DeferredServicesOf<M>, M["event"]>> => {
+  const actions: Array<Action<DeferredErrorOf<M>, DeferredServicesOf<M>, M["event"]>> = []
+  for (const scope of scopes) {
+    const handlers = self.invokeHandlers[scope as keyof typeof self.invokeHandlers] ?? []
+    if (handlers.length > 0) {
+      actions.push({
+        _tag: "StopActor",
+        scope
+      })
+    }
+  }
+  return actions
+}
+
 const actionsForTransition = <
   M extends Any,
   Source extends Snapshot<StateSchemasOf<M>>
@@ -957,6 +1128,7 @@ const actionsForTransition = <
       event,
       self.actors
     ),
+    ...collectInvokeStopActions(self, exitScopesBetween(current._tag, next._tag)),
     ...transitionActions,
     ...collectLifecycleActions(
       self.entryHandlers,
@@ -964,7 +1136,8 @@ const actionsForTransition = <
       next,
       event,
       self.actors
-    )
+    ),
+    ...collectInvokeStartActions(self, entryScopesBetween(current._tag, next._tag), next, event)
   ]
 
 const evaluateStep = <
@@ -1218,7 +1391,8 @@ const runEvaluatedActions = <
 >(
   self: M,
   evaluated: EvaluatedPlan<StateSchemasOf<M>, M["event"], Source, DeferredErrorOf<M>, DeferredServicesOf<M>>,
-  onRecovery?: (snapshot: Snapshot<StateSchemasOf<M>>) => Effect.Effect<void>
+  onRecovery?: (snapshot: Snapshot<StateSchemasOf<M>>) => Effect.Effect<void>,
+  runtime?: ActorRuntime | undefined
 ): Effect.Effect<
   Plan<StateSchemasOf<M>, M["event"], Source, DeferredErrorOf<M>, DeferredServicesOf<M>>,
   MachineErrorOf<M>,
@@ -1240,7 +1414,7 @@ const runEvaluatedActions = <
         )
       }
       iterations++
-      const result = yield* Effect.exit(runActions(current.actions))
+      const result = yield* Effect.exit(runActions(current.actions, runtime))
       if (Exit.isSuccess(result)) {
         return {
           ...evaluated.plan,
@@ -1360,6 +1534,30 @@ export const start = <M extends Any>(
     const snapshots = yield* Ref.make(initialSnapshot)
     const mailbox = yield* Queue.unbounded<Envelope<Event<M["event"]>, MachineErrorOf<M>>>()
     const changesHub = yield* PubSub.unbounded<Snapshot<StateSchemasOf<M>>>()
+    const children = new Map<string, ReadonlyArray<Scope.Scope>>()
+
+    const runtime: ActorRuntime = {
+      start: (scope, slot, input) =>
+        Effect.gen(function*() {
+          const childScope = yield* Scope.make()
+          yield* (start as (
+            machine: Any,
+            input?: any
+          ) => Effect.Effect<Actor<Any>, never, Scope.Scope | ServicesOf<Any>>)(slot.machine, input[0]).pipe(
+            Effect.provideService(Scope.Scope, childScope)
+          )
+          children.set(scope, [...(children.get(scope) ?? []), childScope])
+        }),
+      stop: (scope) => {
+        const scopes = children.get(scope) ?? []
+        children.delete(scope)
+        return Effect.forEach(scopes, (scope) => Scope.close(scope, Exit.void), { discard: true })
+      }
+    }
+    yield* (runActions(
+      collectInvokeStartActions(machine, entryScopesOf(initialSnapshot._tag), initialSnapshot, undefined),
+      runtime
+    ) as Effect.Effect<void, never, Scope.Scope | ServicesOf<M>>)
 
     const loop = Effect.gen(function*() {
       while (true) {
@@ -1373,7 +1571,7 @@ export const start = <M extends Any>(
         const result = yield* Effect.exit(evaluate(machine, current as any, envelope.event as any))
         if (Exit.isSuccess(result)) {
           yield* publishSnapshot(result.value.plan.next as any)
-          const actionsResult = yield* Effect.exit(runEvaluatedActions(machine, result.value, publishSnapshot))
+          const actionsResult = yield* Effect.exit(runEvaluatedActions(machine, result.value, publishSnapshot, runtime))
           yield* Deferred.succeed(
             envelope.ack,
             Exit.isSuccess(actionsResult) ? Exit.succeed<void>(void 0) : Exit.map(actionsResult, () => void 0)
@@ -1389,7 +1587,7 @@ export const start = <M extends Any>(
         }
         yield* publishSnapshot(recoveryResult.value.plan.next as any)
         const actionsResult = yield* Effect.exit(
-          runEvaluatedActions(machine, recoveryResult.value, publishSnapshot)
+          runEvaluatedActions(machine, recoveryResult.value, publishSnapshot, runtime)
         )
         yield* Deferred.succeed(
           envelope.ack,
@@ -1401,6 +1599,13 @@ export const start = <M extends Any>(
     yield* Effect.forkScoped(loop)
     yield* Effect.addFinalizer(() => Queue.shutdown(mailbox))
     yield* Effect.addFinalizer(() => PubSub.shutdown(changesHub))
+    yield* Effect.addFinalizer(() =>
+      Effect.forEach(
+        children.values(),
+        (scopes) => Effect.forEach(scopes, (scope) => Scope.close(scope, Exit.void), { discard: true }),
+        { discard: true }
+      )
+    )
 
     const send = (event: Event<M["event"]>): Effect.Effect<void, MachineErrorOf<M>> =>
       Effect.gen(function*() {

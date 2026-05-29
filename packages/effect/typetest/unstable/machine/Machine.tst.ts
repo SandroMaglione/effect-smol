@@ -430,9 +430,16 @@ describe("Machine", () => {
       states: [Idle]
     })
 
-    const logic = Machine.actor(child)
+    const parent = Machine.make({
+      events: [Ping],
+      initial: () => new Idle({}),
+      states: [Idle],
+      actors: {
+        child
+      }
+    })
 
-    expect<typeof logic>().type.toBe<Machine.ActorLogic<typeof child>>()
+    expect<typeof parent.actors.child>().type.toBe<Machine.ActorSlot<typeof child>>()
   })
 
   it("exposes declared actor slots in handler args", () => {
@@ -467,7 +474,7 @@ describe("Machine", () => {
       initial: () => new Idle({}),
       states: [Idle, Done],
       actors: {
-        child: Machine.actor(child)
+        child
       }
     }).handlers("Idle")({
       Create: ({ actors }) => {
@@ -499,12 +506,106 @@ describe("Machine", () => {
       initial: () => new Idle({}),
       states: [Idle],
       actors: {
-        child: Machine.actor(child)
+        child
       }
     })
     const acceptActorRef = (_: Machine.ActorRef<typeof child>) => {}
 
     expect<Machine.Actor<typeof child>>().type.toBeAssignableTo<Machine.ActorRef<typeof child>>()
     expect(acceptActorRef).type.not.toBeCallableWith(parent.actors.child)
+  })
+
+  it("requires invoke input for child machines with input", () => {
+    const ChildInput = Schema.Struct({
+      userId: Schema.String
+    })
+
+    class Ping extends Schema.TaggedClass<Ping, { readonly _: unique symbol }>()(
+      "Ping",
+      {}
+    ) {}
+
+    class Login extends Schema.TaggedClass<Login, { readonly _: unique symbol }>()(
+      "Login",
+      { userId: Schema.String }
+    ) {}
+
+    class Idle extends Schema.TaggedClass<Idle, { readonly _: unique symbol }>()(
+      "Idle",
+      {}
+    ) {}
+
+    class Active extends Schema.TaggedClass<Active, { readonly _: unique symbol }>()(
+      "Active",
+      { userId: Schema.String }
+    ) {}
+
+    const child = Machine.make({
+      input: ChildInput,
+      events: [Ping],
+      initial: ({ input }) => new Active({ userId: input.userId }),
+      states: [Active]
+    })
+
+    const parent = Machine.make({
+      events: [Login],
+      initial: () => new Idle({}),
+      states: [Idle, Active],
+      actors: {
+        child
+      }
+    })
+
+    parent.invoke("Active", ({ actors, state }) => {
+      expect<typeof state>().type.toBe<Active>()
+      return {
+        actor: actors.child,
+        input: {
+          userId: state.userId
+        }
+      }
+    })
+
+    // @ts-expect-error Property 'input' is missing
+    parent.invoke("Active", ({ actors }) => ({
+      actor: actors.child
+    }))
+  })
+
+  it("omits invoke input for child machines without input", () => {
+    class Ping extends Schema.TaggedClass<Ping, { readonly _: unique symbol }>()(
+      "Ping",
+      {}
+    ) {}
+
+    class Idle extends Schema.TaggedClass<Idle, { readonly _: unique symbol }>()(
+      "Idle",
+      {}
+    ) {}
+
+    const child = Machine.make({
+      events: [Ping],
+      initial: () => new Idle({}),
+      states: [Idle]
+    })
+
+    const parent = Machine.make({
+      events: [Ping],
+      initial: () => new Idle({}),
+      states: [Idle],
+      actors: {
+        child
+      }
+    })
+
+    parent.invoke("Idle", ({ actors }) => ({
+      actor: actors.child
+    }))
+
+    parent.invoke("Idle", ({ actors }) => ({
+      actor: actors.child,
+      // @ts-expect-error Type '{}' is not assignable to type 'never'
+      input: {}
+    }))
   })
 })

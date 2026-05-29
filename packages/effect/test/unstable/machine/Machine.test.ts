@@ -603,7 +603,7 @@ describe("Machine", () => {
         initial: () => new Uncreated({}),
         states: [Uncreated, Created],
         actors: {
-          child: Machine.actor(ChildMachine)
+          child: ChildMachine
         }
       }).handlers("Uncreated")({
         Create: ({ event }) => new Created({ user: { id: "user-1", email: event.email } })
@@ -616,10 +616,93 @@ describe("Machine", () => {
       assert.strictEqual(actor.id, "ParentMachine")
       assert.strictEqual(ParentMachine.actors.child._tag, "ActorSlot")
       assert.strictEqual(ParentMachine.actors.child.key, "child")
+      assert.strictEqual(ParentMachine.actors.child.machine, ChildMachine)
       assert.instanceOf(snapshot, Created)
       assert.deepStrictEqual(snapshot.user, {
         id: "user-1",
         email: "a@example.com"
       })
+    }))
+
+  it.effect("plans invoke actions with input from the entered state", () =>
+    Effect.gen(function*() {
+      const ChildInput = Schema.Struct({
+        userId: Schema.String
+      })
+
+      const ChildMachine = Machine.make({
+        input: ChildInput,
+        id: "ChildMachine",
+        events: [Refresh],
+        initial: ({ input }) => new AuthenticatedIdle({ userId: input.userId }),
+        states: [AuthenticatedIdle, AuthenticatedRefreshing]
+      })
+
+      const ParentMachine = Machine.make({
+        id: "ParentMachine",
+        events: [Create, Delete],
+        initial: () => new Uncreated({}),
+        states: [Uncreated, Created, Deleted],
+        actors: {
+          child: ChildMachine
+        }
+      })
+        .handlers("Uncreated")({
+          Create: ({ event }) => new Created({ user: { id: "user-1", email: event.email } })
+        })
+        .handlers("Created")({
+          Delete: ({ state }) => new Deleted({ userId: state.user.id })
+        })
+        .invoke("Created", ({ actors, state }) => ({
+          actor: actors.child,
+          input: {
+            userId: state.user.id
+          }
+        }))
+
+      const started = yield* Machine.plan(
+        ParentMachine,
+        Machine.initial(ParentMachine),
+        new Create({
+          email: "a@example.com"
+        })
+      )
+      const stopped = yield* Machine.plan(ParentMachine, started.next, new Delete({}))
+
+      assert.strictEqual(started.actions.at(-1)?._tag, "StartActor")
+      assert.deepStrictEqual((started.actions.at(-1) as Machine.StartActorAction).input, [{ userId: "user-1" }])
+      assert.strictEqual((started.actions.at(-1) as Machine.StartActorAction).slot, ParentMachine.actors.child)
+
+      assert.strictEqual(stopped.actions[0]?._tag, "StopActor")
+      assert.strictEqual((stopped.actions[0] as Machine.StopActorAction).scope, "Created")
+    }))
+
+  it.effect("starts invoked children for the initial state", () =>
+    Effect.gen(function*() {
+      let starts = 0
+
+      const ChildMachine = Machine.make({
+        events: [Refresh],
+        initial: () => {
+          starts++
+          return new AuthenticatedIdle({ userId: "child" })
+        },
+        states: [AuthenticatedIdle]
+      })
+
+      const ParentMachine = Machine.make({
+        events: [Rename],
+        initial: () => new Created({ user: { id: "user-1", email: "a@example.com" } }),
+        states: [Created],
+        actors: {
+          child: ChildMachine
+        }
+      }).invoke("Created", ({ actors }) => ({
+        actor: actors.child
+      }))
+
+      yield* Machine.start(ParentMachine)
+
+      assert.strictEqual(starts, 1)
     }))
 })
