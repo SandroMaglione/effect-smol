@@ -119,6 +119,34 @@ export type Handlers<
   readonly [Tag in EventTag<EventSchema>]?: Handler<StateSchemas, Scope, EventSchema, Tag, E, R>
 }
 
+/**
+ * @since 4.0.0
+ * @category models
+ */
+export interface LifecycleArgs<
+  EventSchema extends AnyEventSchema,
+  StateSchemas extends AnyStateSchemas,
+  Scope extends ScopesOfStates<StateSchemas>
+> {
+  readonly state: ReducedSnapshot<StatesInScope<StateSchemas, Scope>>
+  readonly event: Event<EventSchema>
+}
+
+/**
+ * @since 4.0.0
+ * @category models
+ */
+export type LifecycleHandler<
+  EventSchema extends AnyEventSchema,
+  StateSchemas extends AnyStateSchemas,
+  Scope extends ScopesOfStates<StateSchemas>,
+  E = never,
+  R = never
+> = (
+  args: LifecycleArgs<EventSchema, StateSchemas, Scope>,
+  actions: ActionQueue<E, R, EventSchema>
+) => void
+
 type HandlerDefinitions<
   EventSchema extends AnyEventSchema,
   StateSchemas extends AnyStateSchemas,
@@ -131,6 +159,7 @@ type HandlerDefinitions<
 }
 
 type HandlerUnion<HandlersDef extends Record<string, any>> = Exclude<HandlersDef[keyof HandlersDef], undefined>
+type LifecycleUnion<HandlersDef extends ReadonlyArray<any>> = HandlersDef[number]
 
 /**
  * @since 4.0.0
@@ -181,6 +210,14 @@ type InferDeferredServices<HandlersDef extends Record<string, any>> = HandlerUni
   (args: any, actions: infer Queue) => any ? InferQueueServices<Queue>
   : never
 
+type InferLifecycleError<HandlersDef extends ReadonlyArray<any>> = LifecycleUnion<HandlersDef> extends
+  (args: any, actions: infer Queue) => any ? InferQueueError<Queue>
+  : never
+
+type InferLifecycleServices<HandlersDef extends ReadonlyArray<any>> = LifecycleUnion<HandlersDef> extends
+  (args: any, actions: infer Queue) => any ? InferQueueServices<Queue>
+  : never
+
 type InferHandlerError<HandlersDef extends Record<string, any>> = HandlerUnion<HandlersDef> extends never ? never
   : never
 type InferHandlerServices<HandlersDef extends Record<string, any>> = HandlerUnion<HandlersDef> extends never ? never
@@ -227,6 +264,12 @@ export interface Machine<
   readonly scopedHandlers: Partial<
     Record<ScopesOfStates<StateSchemas>, Handlers<EventSchema, StateSchemas, any, any, any>>
   >
+  readonly entryHandlers: Partial<
+    Record<ScopesOfStates<StateSchemas>, ReadonlyArray<LifecycleHandler<EventSchema, StateSchemas, any, any, any>>>
+  >
+  readonly exitHandlers: Partial<
+    Record<ScopesOfStates<StateSchemas>, ReadonlyArray<LifecycleHandler<EventSchema, StateSchemas, any, any, any>>>
+  >
   readonly handlers: <Scope extends ScopesOfStates<StateSchemas>>(
     scope: Scope
   ) => <HandlersDef extends HandlerDefinitions<EventSchema, StateSchemas, Scope>>(
@@ -239,6 +282,36 @@ export interface Machine<
     InferHandlerServices<HandlersDef> | R,
     InferDeferredError<HandlersDef> | DeferredE,
     InferDeferredServices<HandlersDef> | DeferredR
+  >
+  readonly entry: <
+    Scope extends ScopesOfStates<StateSchemas>,
+    HandlersDef extends ReadonlyArray<LifecycleHandler<EventSchema, StateSchemas, Scope, any, any>>
+  >(
+    scope: Scope,
+    ...handlers: HandlersDef
+  ) => Machine<
+    EventSchema,
+    StateSchemas,
+    InputSchema,
+    E,
+    R,
+    InferLifecycleError<HandlersDef> | DeferredE,
+    InferLifecycleServices<HandlersDef> | DeferredR
+  >
+  readonly exit: <
+    Scope extends ScopesOfStates<StateSchemas>,
+    HandlersDef extends ReadonlyArray<LifecycleHandler<EventSchema, StateSchemas, Scope, any, any>>
+  >(
+    scope: Scope,
+    ...handlers: HandlersDef
+  ) => Machine<
+    EventSchema,
+    StateSchemas,
+    InputSchema,
+    E,
+    R,
+    InferLifecycleError<HandlersDef> | DeferredE,
+    InferLifecycleServices<HandlersDef> | DeferredR
   >
 }
 
@@ -382,6 +455,19 @@ const scopesOf = (tag: string): ReadonlyArray<string> => {
   return scopes
 }
 
+const entryScopesOf = (tag: string): ReadonlyArray<string> => Array.from(scopesOf(tag)).reverse()
+const exitScopesOf = scopesOf
+
+const exitScopesBetween = (from: string, to: string): ReadonlyArray<string> => {
+  const toScopes = new Set(scopesOf(to))
+  return exitScopesOf(from).filter((scope) => !toScopes.has(scope))
+}
+
+const entryScopesBetween = (from: string, to: string): ReadonlyArray<string> => {
+  const fromScopes = new Set(scopesOf(from))
+  return entryScopesOf(to).filter((scope) => !fromScopes.has(scope))
+}
+
 /**
  * @since 4.0.0
  * @category constructors
@@ -409,6 +495,18 @@ export const make = <
         ScopesOfStates<StateSchemasOfStates<States>>,
         Handlers<typeof event, StateSchemasOfStates<States>, any, any, any>
       >
+    >,
+    entryHandlers: Partial<
+      Record<
+        ScopesOfStates<StateSchemasOfStates<States>>,
+        ReadonlyArray<LifecycleHandler<typeof event, StateSchemasOfStates<States>, any, any, any>>
+      >
+    >,
+    exitHandlers: Partial<
+      Record<
+        ScopesOfStates<StateSchemasOfStates<States>>,
+        ReadonlyArray<LifecycleHandler<typeof event, StateSchemasOfStates<States>, any, any, any>>
+      >
     >
   ): Machine<typeof event, StateSchemasOfStates<States>, InputSchema, E, R, DeferredE, DeferredR> => ({
     [TypeId]: TypeId,
@@ -419,18 +517,50 @@ export const make = <
     initial,
     states,
     scopedHandlers: scopedHandlers as any,
+    entryHandlers: entryHandlers as any,
+    exitHandlers: exitHandlers as any,
     handlers: (scope) => (handlers) =>
       makeMachine<
         InferHandlerError<typeof handlers> | E,
         InferHandlerServices<typeof handlers> | R,
         InferDeferredError<typeof handlers> | DeferredE,
         InferDeferredServices<typeof handlers> | DeferredR
-      >({
-        ...scopedHandlers,
-        [scope]: handlers as Handlers<typeof event, StateSchemasOfStates<States>, typeof scope, any, any>
+      >(
+        {
+          ...scopedHandlers,
+          [scope]: handlers as Handlers<typeof event, StateSchemasOfStates<States>, typeof scope, any, any>
+        },
+        entryHandlers,
+        exitHandlers
+      ),
+    entry: (scope, ...handlers) =>
+      makeMachine<
+        E,
+        R,
+        InferLifecycleError<typeof handlers> | DeferredE,
+        InferLifecycleServices<typeof handlers> | DeferredR
+      >(scopedHandlers, {
+        ...entryHandlers,
+        [scope]: [
+          ...(entryHandlers[scope] ?? []),
+          ...handlers
+        ] as ReadonlyArray<LifecycleHandler<typeof event, StateSchemasOfStates<States>, typeof scope, any, any>>
+      }, exitHandlers),
+    exit: (scope, ...handlers) =>
+      makeMachine<
+        E,
+        R,
+        InferLifecycleError<typeof handlers> | DeferredE,
+        InferLifecycleServices<typeof handlers> | DeferredR
+      >(scopedHandlers, entryHandlers, {
+        ...exitHandlers,
+        [scope]: [
+          ...(exitHandlers[scope] ?? []),
+          ...handlers
+        ] as ReadonlyArray<LifecycleHandler<typeof event, StateSchemasOfStates<States>, typeof scope, any, any>>
       })
   })
-  return makeMachine<never, never, never, never>({})
+  return makeMachine<never, never, never, never>({}, {}, {})
 }
 
 const snapshotSchemaFromStates = <const States extends AnyStateTuple>(states: States): AnyTaggedUnion =>
@@ -529,6 +659,33 @@ const raisedEvents = <EventSchema extends AnyEventSchema>(
   return events
 }
 
+const collectLifecycleActions = <
+  M extends Any,
+  Source extends Snapshot<StateSchemasOf<M>>
+>(
+  handlersByScope: Partial<
+    Record<
+      ScopesOfStates<StateSchemasOf<M>>,
+      ReadonlyArray<LifecycleHandler<M["event"], StateSchemasOf<M>, any, any, any>>
+    >
+  >,
+  scopes: ReadonlyArray<string>,
+  state: Source,
+  event: Event<M["event"]>
+): ReadonlyArray<Action<DeferredErrorOf<M>, DeferredServicesOf<M>, M["event"]>> => {
+  const [actions, readActions] = makeActionQueue<M["event"], DeferredErrorOf<M>, DeferredServicesOf<M>>()
+  for (const scope of scopes) {
+    const handlers = handlersByScope[scope as keyof typeof handlersByScope] ?? []
+    for (const handler of handlers) {
+      handler({
+        state: state as any,
+        event
+      }, actions)
+    }
+  }
+  return readActions()
+}
+
 const evaluateStep = <
   M extends Any,
   Source extends Snapshot<StateSchemasOf<M>>
@@ -572,7 +729,12 @@ const evaluateStep = <
       state: current as any,
       event: currentEvent as any
     }, actions)
-    const collectedActions = readActions()
+    const transitionActions = readActions()
+    const collectedActions = next === current ? transitionActions : [
+      ...collectLifecycleActions(self.exitHandlers, exitScopesBetween(current._tag, next._tag), current, currentEvent),
+      ...transitionActions,
+      ...collectLifecycleActions(self.entryHandlers, entryScopesBetween(current._tag, next._tag), next, currentEvent)
+    ]
     return {
       plan: {
         snapshot: current,

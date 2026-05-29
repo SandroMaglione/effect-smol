@@ -59,6 +59,11 @@ describe("Machine", () => {
     {}
   ) {}
 
+  class StartRefresh extends Schema.TaggedClass<StartRefresh, { readonly _: unique symbol }>()(
+    "StartRefresh",
+    {}
+  ) {}
+
   class Unauthenticated extends Schema.TaggedClass<Unauthenticated, { readonly _: unique symbol }>()(
     "Unauthenticated",
     {}
@@ -295,6 +300,72 @@ describe("Machine", () => {
 
       assert.instanceOf(next, Created)
       assert.strictEqual(next.user.email, "raised@example.com")
+    }))
+
+  it.effect("collects exit and entry actions around changed transitions", () =>
+    Effect.gen(function*() {
+      const LifecycleMachine = Machine.make({
+        events: [Logout, StartRefresh],
+        states: [AuthenticatedIdle, AuthenticatedRefreshing, Unauthenticated],
+        initial: () => new AuthenticatedIdle({ userId: "user-1" })
+      })
+        .exit("Authenticated", (_, actions) => {
+          actions.effect(DeferredLog.use((log) => log.push("exit:authenticated")))
+        })
+        .exit("Authenticated.Idle", (_, actions) => {
+          actions.effect(DeferredLog.use((log) => log.push("exit:idle")))
+        })
+        .entry("Authenticated.Refreshing", (_, actions) => {
+          actions.effect(DeferredLog.use((log) => log.push("entry:refreshing")))
+        })
+        .entry("Unauthenticated", (_, actions) => {
+          actions.effect(DeferredLog.use((log) => log.push("entry:unauthenticated")))
+        })
+        .handlers("Authenticated.Idle")({
+          StartRefresh: ({ state }, actions) => {
+            actions.effect(DeferredLog.use((log) => log.push("transition:refresh")))
+            return new AuthenticatedRefreshing({ userId: state.userId })
+          }
+        })
+        .handlers("Authenticated")({
+          Logout: (_, actions) => {
+            actions.effect(DeferredLog.use((log) => log.push("transition:logout")))
+            return new Unauthenticated({})
+          }
+        })
+
+      const log = yield* makeDeferredLog
+      const initial = Machine.initial(LifecycleMachine)
+      const planned = yield* Machine.plan(LifecycleMachine, initial, new StartRefresh({}))
+
+      assert.instanceOf(planned.next, AuthenticatedRefreshing)
+      assert.strictEqual(planned.actions.length, 3)
+      assert.deepStrictEqual(yield* log.read, [])
+
+      const refreshing = yield* Machine.next(LifecycleMachine, initial, new StartRefresh({})).pipe(
+        Effect.provideService(DeferredLog, log)
+      )
+
+      assert.instanceOf(refreshing, AuthenticatedRefreshing)
+      assert.deepStrictEqual(yield* log.read, [
+        "exit:idle",
+        "transition:refresh",
+        "entry:refreshing"
+      ])
+
+      const loggedOut = yield* Machine.next(LifecycleMachine, refreshing, new Logout({})).pipe(
+        Effect.provideService(DeferredLog, log)
+      )
+
+      assert.instanceOf(loggedOut, Unauthenticated)
+      assert.deepStrictEqual(yield* log.read, [
+        "exit:idle",
+        "transition:refresh",
+        "entry:refreshing",
+        "exit:authenticated",
+        "transition:logout",
+        "entry:unauthenticated"
+      ])
     }))
 
   it.effect("plan does not run deferred effects", () =>

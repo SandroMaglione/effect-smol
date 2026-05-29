@@ -286,4 +286,45 @@ describe("Machine", () => {
       >
     >()
   })
+
+  it("tracks lifecycle effect errors and services", () => {
+    class LifecycleError extends Schema.TaggedErrorClass<LifecycleError, { readonly _: unique symbol }>()(
+      "LifecycleError",
+      {}
+    ) {}
+
+    class LifecycleDependency extends Context.Service<LifecycleDependency, {
+      readonly emit: Effect.Effect<void, LifecycleError>
+    }>()("test/Machine/LifecycleDependency") {}
+
+    class Create extends Schema.TaggedClass<Create, { readonly _: unique symbol }>()(
+      "Create",
+      {}
+    ) {}
+
+    class Idle extends Schema.TaggedClass<Idle, { readonly _: unique symbol }>()(
+      "Idle",
+      {}
+    ) {}
+
+    class Done extends Schema.TaggedClass<Done, { readonly _: unique symbol }>()(
+      "Done",
+      {}
+    ) {}
+
+    const machine = Machine.make({
+      events: [Create],
+      initial: () => new Idle({}),
+      states: [Idle, Done]
+    })
+      .entry("Done", (_, actions: Machine.ActionQueue<LifecycleError, LifecycleDependency, any>) => {
+        actions.effect(LifecycleDependency.use((dependency) => dependency.emit))
+      })
+      .handlers("Idle")({
+        Create: () => new Done({})
+      })
+
+    expect<Machine.DeferredErrorOf<typeof machine>>().type.toBe<LifecycleError>()
+    expect<Machine.DeferredServicesOf<typeof machine>>().type.toBe<LifecycleDependency>()
+  })
 })
