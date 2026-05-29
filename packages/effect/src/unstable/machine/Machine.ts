@@ -1,9 +1,11 @@
 /**
  * @since 4.0.0
  */
+import * as Cause from "../../Cause.ts"
 import * as Deferred from "../../Deferred.ts"
 import * as Effect from "../../Effect.ts"
 import * as Exit from "../../Exit.ts"
+import * as Option from "../../Option.ts"
 import * as Predicate from "../../Predicate.ts"
 import * as PubSub from "../../PubSub.ts"
 import * as Queue from "../../Queue.ts"
@@ -12,6 +14,7 @@ import * as Schema from "../../Schema.ts"
 import * as SchemaAST from "../../SchemaAST.ts"
 import type * as Scope from "../../Scope.ts"
 import * as Stream from "../../Stream.ts"
+import type * as Types from "../../Types.ts"
 
 const TypeId = "~effect/unstable/machine/Machine" as const
 
@@ -147,6 +150,64 @@ export type LifecycleHandler<
   actions: ActionQueue<E, R, EventSchema>
 ) => void
 
+/**
+ * @since 4.0.0
+ * @category models
+ */
+export interface CatchArgs<
+  EventSchema extends AnyEventSchema,
+  StateSchemas extends AnyStateSchemas,
+  E
+> {
+  readonly state: Snapshot<StateSchemas>
+  readonly event: Event<EventSchema>
+  readonly error: E
+}
+
+/**
+ * @since 4.0.0
+ * @category models
+ */
+export type CatchHandler<
+  EventSchema extends AnyEventSchema,
+  StateSchemas extends AnyStateSchemas,
+  E,
+  E2 = never,
+  R2 = never
+> = (
+  args: CatchArgs<EventSchema, StateSchemas, E>,
+  actions: ActionQueue<E2, R2, EventSchema>
+) => Transition<StateSchemas>
+
+/**
+ * @since 4.0.0
+ * @category models
+ */
+export interface CatchCauseArgs<
+  EventSchema extends AnyEventSchema,
+  StateSchemas extends AnyStateSchemas,
+  E
+> {
+  readonly state: Snapshot<StateSchemas>
+  readonly event: Event<EventSchema>
+  readonly cause: Cause.Cause<E>
+}
+
+/**
+ * @since 4.0.0
+ * @category models
+ */
+export type CatchCauseHandler<
+  EventSchema extends AnyEventSchema,
+  StateSchemas extends AnyStateSchemas,
+  E,
+  E2 = never,
+  R2 = never
+> = (
+  args: CatchCauseArgs<EventSchema, StateSchemas, E>,
+  actions: ActionQueue<E2, R2, EventSchema>
+) => Transition<StateSchemas>
+
 type HandlerDefinitions<
   EventSchema extends AnyEventSchema,
   StateSchemas extends AnyStateSchemas,
@@ -218,6 +279,13 @@ type InferLifecycleServices<HandlersDef extends ReadonlyArray<any>> = LifecycleU
   (args: any, actions: infer Queue) => any ? InferQueueServices<Queue>
   : never
 
+type InferCatchError<HandlerDef> = HandlerDef extends (args: any, actions: infer Queue) => any ? InferQueueError<Queue>
+  : never
+
+type InferCatchServices<HandlerDef> = HandlerDef extends (args: any, actions: infer Queue) => any ?
+  InferQueueServices<Queue>
+  : never
+
 type InferHandlerError<HandlersDef extends Record<string, any>> = HandlerUnion<HandlersDef> extends never ? never
   : never
 type InferHandlerServices<HandlersDef extends Record<string, any>> = HandlerUnion<HandlersDef> extends never ? never
@@ -264,6 +332,10 @@ export interface Machine<
   readonly scopedHandlers: Partial<
     Record<ScopesOfStates<StateSchemas>, Handlers<EventSchema, StateSchemas, any, any, any>>
   >
+  readonly catchHandlers: Partial<Record<string, CatchHandler<any, any, any, any, any>>>
+  readonly catchCauseHandler:
+    | CatchCauseHandler<any, any, any, any, any>
+    | undefined
   readonly entryHandlers: Partial<
     Record<ScopesOfStates<StateSchemas>, ReadonlyArray<LifecycleHandler<EventSchema, StateSchemas, any, any, any>>>
   >
@@ -282,6 +354,40 @@ export interface Machine<
     InferHandlerServices<HandlersDef> | R,
     InferDeferredError<HandlersDef> | DeferredE,
     InferDeferredServices<HandlersDef> | DeferredR
+  >
+  readonly catch: <
+    Tag extends Types.Tags<E | DeferredE>,
+    HandlerDef extends CatchHandler<EventSchema, StateSchemas, Types.ExtractTag<E | DeferredE, Tag>, any, any>
+  >(
+    tag: Tag,
+    handler: HandlerDef
+  ) => Machine<
+    EventSchema,
+    StateSchemas,
+    InputSchema,
+    Types.ExcludeTag<E, Tag>,
+    R,
+    Types.ExcludeTag<DeferredE, Tag> | InferCatchError<HandlerDef>,
+    DeferredR | InferCatchServices<HandlerDef>
+  >
+  readonly catchCause: <
+    HandlerDef extends CatchCauseHandler<
+      EventSchema,
+      StateSchemas,
+      E | DeferredE | UnhandledEventError | InternalEventLoopError,
+      any,
+      any
+    >
+  >(
+    handler: HandlerDef
+  ) => Machine<
+    EventSchema,
+    StateSchemas,
+    InputSchema,
+    never,
+    R,
+    InferCatchError<HandlerDef>,
+    DeferredR | InferCatchServices<HandlerDef>
   >
   readonly entry: <
     Scope extends ScopesOfStates<StateSchemas>,
@@ -496,6 +602,10 @@ export const make = <
         Handlers<typeof event, StateSchemasOfStates<States>, any, any, any>
       >
     >,
+    catchHandlers: Partial<Record<string, CatchHandler<any, any, any, any, any>>>,
+    catchCauseHandler:
+      | CatchCauseHandler<any, any, any, any, any>
+      | undefined,
     entryHandlers: Partial<
       Record<
         ScopesOfStates<StateSchemasOfStates<States>>,
@@ -517,6 +627,8 @@ export const make = <
     initial,
     states,
     scopedHandlers: scopedHandlers as any,
+    catchHandlers,
+    catchCauseHandler,
     entryHandlers: entryHandlers as any,
     exitHandlers: exitHandlers as any,
     handlers: (scope) => (handlers) =>
@@ -530,6 +642,37 @@ export const make = <
           ...scopedHandlers,
           [scope]: handlers as Handlers<typeof event, StateSchemasOfStates<States>, typeof scope, any, any>
         },
+        catchHandlers,
+        catchCauseHandler,
+        entryHandlers,
+        exitHandlers
+      ),
+    catch: (tag, handler) =>
+      makeMachine<
+        Types.ExcludeTag<E, typeof tag>,
+        R,
+        Types.ExcludeTag<DeferredE, typeof tag> | InferCatchError<typeof handler>,
+        DeferredR | InferCatchServices<typeof handler>
+      >(
+        scopedHandlers,
+        {
+          ...catchHandlers,
+          [tag]: handler as CatchHandler<any, any, any, any, any>
+        },
+        catchCauseHandler,
+        entryHandlers,
+        exitHandlers
+      ),
+    catchCause: (handler) =>
+      makeMachine<
+        never,
+        R,
+        InferCatchError<typeof handler>,
+        DeferredR | InferCatchServices<typeof handler>
+      >(
+        scopedHandlers,
+        {},
+        handler as CatchCauseHandler<any, any, any, any, any>,
         entryHandlers,
         exitHandlers
       ),
@@ -539,7 +682,7 @@ export const make = <
         R,
         InferLifecycleError<typeof handlers> | DeferredE,
         InferLifecycleServices<typeof handlers> | DeferredR
-      >(scopedHandlers, {
+      >(scopedHandlers, catchHandlers, catchCauseHandler, {
         ...entryHandlers,
         [scope]: [
           ...(entryHandlers[scope] ?? []),
@@ -552,7 +695,7 @@ export const make = <
         R,
         InferLifecycleError<typeof handlers> | DeferredE,
         InferLifecycleServices<typeof handlers> | DeferredR
-      >(scopedHandlers, entryHandlers, {
+      >(scopedHandlers, catchHandlers, catchCauseHandler, entryHandlers, {
         ...exitHandlers,
         [scope]: [
           ...(exitHandlers[scope] ?? []),
@@ -560,7 +703,7 @@ export const make = <
         ] as ReadonlyArray<LifecycleHandler<typeof event, StateSchemasOfStates<States>, typeof scope, any, any>>
       })
   })
-  return makeMachine<never, never, never, never>({}, {}, {})
+  return makeMachine<never, never, never, never>({}, {}, undefined, {}, {})
 }
 
 const snapshotSchemaFromStates = <const States extends AnyStateTuple>(states: States): AnyTaggedUnion =>
@@ -686,6 +829,22 @@ const collectLifecycleActions = <
   return readActions()
 }
 
+const actionsForTransition = <
+  M extends Any,
+  Source extends Snapshot<StateSchemasOf<M>>
+>(
+  self: M,
+  current: Source,
+  next: Snapshot<StateSchemasOf<M>>,
+  event: Event<M["event"]>,
+  transitionActions: ReadonlyArray<Action<DeferredErrorOf<M>, DeferredServicesOf<M>, M["event"]>>
+): ReadonlyArray<Action<DeferredErrorOf<M>, DeferredServicesOf<M>, M["event"]>> =>
+  next === current ? transitionActions : [
+    ...collectLifecycleActions(self.exitHandlers, exitScopesBetween(current._tag, next._tag), current, event),
+    ...transitionActions,
+    ...collectLifecycleActions(self.entryHandlers, entryScopesBetween(current._tag, next._tag), next, event)
+  ]
+
 const evaluateStep = <
   M extends Any,
   Source extends Snapshot<StateSchemasOf<M>>
@@ -730,11 +889,7 @@ const evaluateStep = <
       event: currentEvent as any
     }, actions)
     const transitionActions = readActions()
-    const collectedActions = next === current ? transitionActions : [
-      ...collectLifecycleActions(self.exitHandlers, exitScopesBetween(current._tag, next._tag), current, currentEvent),
-      ...transitionActions,
-      ...collectLifecycleActions(self.entryHandlers, entryScopesBetween(current._tag, next._tag), next, currentEvent)
-    ]
+    const collectedActions = actionsForTransition(self, current, next, currentEvent, transitionActions)
     return {
       plan: {
         snapshot: current,
@@ -799,6 +954,152 @@ const evaluate = <
     }
   })
 
+const evaluateRaisedActions = <
+  M extends Any,
+  Source extends Snapshot<StateSchemasOf<M>>
+>(
+  self: M,
+  source: Source,
+  event: Event<M["event"]>,
+  snapshot: Snapshot<StateSchemasOf<M>>,
+  actions: ReadonlyArray<Action<DeferredErrorOf<M>, DeferredServicesOf<M>, M["event"]>>
+): Effect.Effect<
+  EvaluatedPlan<StateSchemasOf<M>, M["event"], Source, DeferredErrorOf<M>, DeferredServicesOf<M>>,
+  UnhandledEventError | InternalEventLoopError | PlanErrorOf<M>,
+  PlanServicesOf<M>
+> =>
+  Effect.gen(function*() {
+    let current = snapshot
+    const internalQueue: Array<Event<M["event"]>> = [...raisedEvents(actions)]
+    const collectedActions: Array<Action<DeferredErrorOf<M>, DeferredServicesOf<M>, M["event"]>> = [...actions]
+    let index = 0
+    let iterations = 0
+
+    while (index < internalQueue.length) {
+      if (iterations >= MaxInternalTransitions) {
+        return yield* Effect.fail(
+          new InternalEventLoopError({
+            machineId: self.id,
+            event: (event as { readonly _tag: string })._tag,
+            maxIterations: MaxInternalTransitions
+          })
+        )
+      }
+      iterations++
+      const currentEvent = internalQueue[index++]!
+      const evaluated = yield* evaluateStep(self, current as any, currentEvent)
+      current = evaluated.plan.next
+      collectedActions.push(...evaluated.actions)
+      internalQueue.push(...raisedEvents(evaluated.actions))
+    }
+
+    return {
+      plan: {
+        snapshot: source,
+        event,
+        next: current,
+        actions: collectedActions,
+        changed: current !== source
+      },
+      actions: collectedActions
+    }
+  })
+
+const recover = <
+  M extends Any,
+  Source extends Snapshot<StateSchemasOf<M>>
+>(
+  self: M,
+  snapshot: Source,
+  event: Event<M["event"]>,
+  cause: Cause.Cause<MachineErrorOf<M>>
+): Effect.Effect<
+  EvaluatedPlan<StateSchemasOf<M>, M["event"], Source, DeferredErrorOf<M>, DeferredServicesOf<M>>,
+  MachineErrorOf<M>,
+  ServicesOf<M>
+> =>
+  Effect.gen(function*() {
+    const current = snapshot as Source
+    const currentEvent = event as Event<M["event"]>
+    const error = Cause.findErrorOption(cause)
+    if (Option.isSome(error) && Predicate.hasProperty(error.value, "_tag")) {
+      const handler = self.catchHandlers[
+        error.value._tag as keyof typeof self.catchHandlers
+      ] as CatchHandler<M["event"], StateSchemasOf<M>, any, DeferredErrorOf<M>, DeferredServicesOf<M>> | undefined
+      if (handler !== undefined) {
+        const [actions, readActions] = makeActionQueue<M["event"], DeferredErrorOf<M>, DeferredServicesOf<M>>()
+        const next = handler({
+          state: current as any,
+          event: currentEvent,
+          error: error.value
+        }, actions)
+        const collectedActions = actionsForTransition(self, current, next, currentEvent, readActions())
+        return yield* evaluateRaisedActions(self, current, currentEvent, next, collectedActions)
+      }
+    }
+
+    const catchCauseHandler = self.catchCauseHandler as
+      | CatchCauseHandler<M["event"], StateSchemasOf<M>, MachineErrorOf<M>, DeferredErrorOf<M>, DeferredServicesOf<M>>
+      | undefined
+    if (catchCauseHandler === undefined) {
+      return yield* Effect.failCause(cause)
+    }
+
+    const [actions, readActions] = makeActionQueue<M["event"], DeferredErrorOf<M>, DeferredServicesOf<M>>()
+    const next = catchCauseHandler({
+      state: current as any,
+      event: currentEvent,
+      cause
+    }, actions)
+    const collectedActions = actionsForTransition(self, current, next, currentEvent, readActions())
+    return yield* evaluateRaisedActions(self, current, currentEvent, next, collectedActions)
+  })
+
+const runEvaluatedActions = <
+  M extends Any,
+  Source extends Snapshot<StateSchemasOf<M>>
+>(
+  self: M,
+  evaluated: EvaluatedPlan<StateSchemasOf<M>, M["event"], Source, DeferredErrorOf<M>, DeferredServicesOf<M>>,
+  onRecovery?: (snapshot: Snapshot<StateSchemasOf<M>>) => Effect.Effect<void>
+): Effect.Effect<
+  Plan<StateSchemasOf<M>, M["event"], Source, DeferredErrorOf<M>, DeferredServicesOf<M>>,
+  MachineErrorOf<M>,
+  ServicesOf<M>
+> =>
+  Effect.gen(function*() {
+    let current = evaluated
+    const actions: Array<Action<DeferredErrorOf<M>, DeferredServicesOf<M>, M["event"]>> = [...evaluated.actions]
+    let iterations = 0
+
+    while (true) {
+      if (iterations >= MaxInternalTransitions) {
+        return yield* Effect.fail(
+          new InternalEventLoopError({
+            machineId: self.id,
+            event: (evaluated.plan.event as { readonly _tag: string })._tag,
+            maxIterations: MaxInternalTransitions
+          })
+        )
+      }
+      iterations++
+      const result = yield* Effect.exit(runActions(current.actions))
+      if (Exit.isSuccess(result)) {
+        return {
+          ...evaluated.plan,
+          next: current.plan.next,
+          actions,
+          changed: evaluated.plan.changed || current.plan.changed
+        }
+      }
+      current = yield* recover(self, current.plan.next as any, evaluated.plan.event, result.cause)
+      if (onRecovery !== undefined) {
+        yield* onRecovery(current.plan.next)
+      }
+      actions.push(...current.actions)
+    }
+  })
+
 /**
  * @since 4.0.0
  * @category constructors
@@ -833,9 +1134,13 @@ export const transition = <
   ServicesOf<M>
 > =>
   Effect.gen(function*() {
-    const evaluated = yield* evaluate(self, snapshot, event)
-    yield* runActions(evaluated.actions)
-    return evaluated.plan
+    const evaluated = yield* Effect.exit(evaluate(self, snapshot, event))
+    if (Exit.isFailure(evaluated)) {
+      const recovered = yield* recover(self, snapshot, event, evaluated.cause)
+      yield* runActions(recovered.actions)
+      return recovered.plan
+    }
+    return yield* runEvaluatedActions(self, evaluated.value)
   })
 
 /**
@@ -903,18 +1208,36 @@ export const start = <M extends Any>(
       while (true) {
         const envelope = yield* Queue.take(mailbox)
         const current = yield* Ref.get(snapshots)
+        const publishSnapshot = (snapshot: Snapshot<StateSchemasOf<M>>): Effect.Effect<void> =>
+          Effect.gen(function*() {
+            yield* Ref.set(snapshots, snapshot)
+            yield* PubSub.publish(changesHub, snapshot)
+          })
         const result = yield* Effect.exit(evaluate(machine, current as any, envelope.event as any))
         if (Exit.isSuccess(result)) {
-          yield* Ref.set(snapshots, result.value.plan.next as any)
-          yield* PubSub.publish(changesHub, result.value.plan.next as any)
-          const deferredResult = yield* Effect.exit(runActions(result.value.actions))
+          yield* publishSnapshot(result.value.plan.next as any)
+          const actionsResult = yield* Effect.exit(runEvaluatedActions(machine, result.value, publishSnapshot))
           yield* Deferred.succeed(
             envelope.ack,
-            Exit.isSuccess(deferredResult) ? Exit.succeed<void>(void 0) : deferredResult
+            Exit.isSuccess(actionsResult) ? Exit.succeed<void>(void 0) : Exit.map(actionsResult, () => void 0)
           )
           continue
         }
-        yield* Deferred.succeed(envelope.ack, Exit.map(result, () => void 0))
+        const recoveryResult = yield* Effect.exit(
+          recover(machine, current as any, envelope.event as any, result.cause as any)
+        )
+        if (Exit.isFailure(recoveryResult)) {
+          yield* Deferred.succeed(envelope.ack, Exit.map(recoveryResult, () => void 0))
+          continue
+        }
+        yield* publishSnapshot(recoveryResult.value.plan.next as any)
+        const actionsResult = yield* Effect.exit(
+          runEvaluatedActions(machine, recoveryResult.value, publishSnapshot)
+        )
+        yield* Deferred.succeed(
+          envelope.ack,
+          Exit.isSuccess(actionsResult) ? Exit.succeed<void>(void 0) : Exit.map(actionsResult, () => void 0)
+        )
       }
     })
 

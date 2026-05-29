@@ -1,5 +1,5 @@
 import { assert, describe, it } from "@effect/vitest"
-import { Effect, Ref, Schema } from "effect"
+import { Cause, Effect, Ref, Schema } from "effect"
 import * as Context from "effect/Context"
 import * as Machine from "effect/unstable/machine/Machine"
 
@@ -81,6 +81,21 @@ describe("Machine", () => {
       read: Ref.get(ref)
     })
   })
+
+  class SaveError extends Schema.TaggedErrorClass<SaveError, { readonly _: unique symbol }>()(
+    "SaveError",
+    { reason: Schema.String }
+  ) {}
+
+  class AuditError extends Schema.TaggedErrorClass<AuditError, { readonly _: unique symbol }>()(
+    "AuditError",
+    { reason: Schema.String }
+  ) {}
+
+  class Failed extends Schema.TaggedClass<Failed, { readonly _: unique symbol }>()(
+    "Failed",
+    { reason: Schema.String }
+  ) {}
 
   const UserMachine = Machine.make({
     id: "UserMachine",
@@ -411,6 +426,143 @@ describe("Machine", () => {
 
       assert.instanceOf(next, Created)
       assert.deepStrictEqual(yield* log.read, ["created"])
+    }))
+
+  it.effect("recovers from tagged deferred failures", () =>
+    Effect.gen(function*() {
+      const RecoveringMachine = Machine.make({
+        events: [Create],
+        initial: () => new Uncreated({}),
+        states: [Uncreated, Created, Failed]
+      })
+        .handlers("Uncreated")({
+          Create: (_, actions: Machine.ActionQueue<SaveError>) => {
+            actions.effect(Effect.fail(new SaveError({ reason: "offline" })))
+            return new Created({ user: { id: "user-1", email: "a@example.com" } })
+          }
+        })
+        .catch("SaveError", ({ error }, actions) => {
+          actions.effect(DeferredLog.use((log) => log.push(error.reason)))
+          return new Failed({ reason: error.reason })
+        })
+
+      const log = yield* makeDeferredLog
+      const initial = Machine.initial(RecoveringMachine)
+      const next = yield* Machine.next(RecoveringMachine, initial, new Create({ email: "a@example.com" })).pipe(
+        Effect.provideService(DeferredLog, log)
+      )
+
+      assert.instanceOf(next, Failed)
+      assert.strictEqual(next.reason, "offline")
+      assert.deepStrictEqual(yield* log.read, ["offline"])
+    }))
+
+  it.effect("recovers from failures in recovery actions", () =>
+    Effect.gen(function*() {
+      const RecoveringMachine = Machine.make({
+        events: [Create],
+        initial: () => new Uncreated({}),
+        states: [Uncreated, Created, Failed]
+      })
+        .handlers("Uncreated")({
+          Create: (_, actions: Machine.ActionQueue<SaveError | AuditError>) => {
+            actions.effect(Effect.fail(new SaveError({ reason: "offline" })))
+            return new Created({ user: { id: "user-1", email: "a@example.com" } })
+          }
+        })
+        .catch("SaveError", ({ error }, actions: Machine.ActionQueue<AuditError, never, any>) => {
+          actions.effect(Effect.fail(new AuditError({ reason: `audit:${error.reason}` })))
+          return new Failed({ reason: `save:${error.reason}` })
+        })
+        .catch("AuditError", ({ error }) => new Failed({ reason: error.reason }))
+
+      const initial = Machine.initial(RecoveringMachine)
+      const next = yield* Machine.next(RecoveringMachine, initial, new Create({ email: "a@example.com" }))
+
+      assert.instanceOf(next, Failed)
+      assert.strictEqual(next.reason, "audit:offline")
+    }))
+
+  it.effect("limits recovery action loops", () =>
+    Effect.gen(function*() {
+      const RecoveringMachine = Machine.make({
+        id: "RecoveringMachine",
+        events: [Create],
+        initial: () => new Uncreated({}),
+        states: [Uncreated, Created, Failed]
+      })
+        .handlers("Uncreated")({
+          Create: (_, actions: Machine.ActionQueue<SaveError>) => {
+            actions.effect(Effect.fail(new SaveError({ reason: "offline" })))
+            return new Created({ user: { id: "user-1", email: "a@example.com" } })
+          }
+        })
+        .catch("SaveError", ({ error }, actions: Machine.ActionQueue<SaveError, never, any>) => {
+          actions.effect(Effect.fail(new SaveError({ reason: error.reason })))
+          return new Failed({ reason: error.reason })
+        })
+
+      const initial = Machine.initial(RecoveringMachine)
+      const error = yield* Effect.flip(
+        Machine.next(RecoveringMachine, initial, new Create({ email: "a@example.com" }))
+      )
+
+      assert.instanceOf(error, Machine.InternalEventLoopError)
+      assert.strictEqual(error.machineId, "RecoveringMachine")
+      assert.strictEqual(error.event, "Create")
+    }))
+
+  it.effect("processes raised events from recovery handlers", () =>
+    Effect.gen(function*() {
+      const RecoveringMachine = Machine.make({
+        events: [Create, Rename],
+        initial: () => new Uncreated({}),
+        states: [Uncreated, Created, Failed]
+      })
+        .handlers("Uncreated")({
+          Create: (_, actions: Machine.ActionQueue<SaveError>) => {
+            actions.effect(Effect.fail(new SaveError({ reason: "offline" })))
+            return new Created({ user: { id: "user-1", email: "created@example.com" } })
+          }
+        })
+        .handlers("Created")({
+          Rename: ({ state, event }) => new Created({ user: { ...state.user, email: event.email } })
+        })
+        .catch("SaveError", ({ error }, actions) => {
+          actions.raise(new Rename({ email: error.reason }))
+          return new Created({ user: { id: "user-1", email: "recovered@example.com" } })
+        })
+
+      const initial = Machine.initial(RecoveringMachine)
+      const next = yield* Machine.next(RecoveringMachine, initial, new Create({ email: "a@example.com" }))
+
+      assert.instanceOf(next, Created)
+      assert.strictEqual(next.user.email, "offline")
+    }))
+
+  it.effect("recovers from untyped defects with catchCause", () =>
+    Effect.gen(function*() {
+      const RecoveringMachine = Machine.make({
+        events: [Create],
+        initial: () => new Uncreated({}),
+        states: [Uncreated, Created, Failed]
+      })
+        .handlers("Uncreated")({
+          Create: (_, actions) => {
+            actions.effect(Effect.die("boom"))
+            return new Created({ user: { id: "user-1", email: "a@example.com" } })
+          }
+        })
+        .catchCause(({ cause }) => {
+          assert.strictEqual(Cause.hasDies(cause), true)
+          return new Failed({ reason: Cause.pretty(cause) })
+        })
+
+      const initial = Machine.initial(RecoveringMachine)
+      const next = yield* Machine.next(RecoveringMachine, initial, new Create({ email: "a@example.com" }))
+
+      assert.instanceOf(next, Failed)
+      assert.match(next.reason, /boom/)
     }))
 
   it.effect("actor commits snapshot before deferred failures surface", () =>

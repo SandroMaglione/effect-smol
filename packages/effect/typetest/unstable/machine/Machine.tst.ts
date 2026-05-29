@@ -327,4 +327,89 @@ describe("Machine", () => {
     expect<Machine.DeferredErrorOf<typeof machine>>().type.toBe<LifecycleError>()
     expect<Machine.DeferredServicesOf<typeof machine>>().type.toBe<LifecycleDependency>()
   })
+
+  it("narrows tagged errors with catch", () => {
+    class SaveError extends Schema.TaggedErrorClass<SaveError, { readonly _: unique symbol }>()(
+      "SaveError",
+      { reason: Schema.String }
+    ) {}
+
+    class AuditError extends Schema.TaggedErrorClass<AuditError, { readonly _: unique symbol }>()(
+      "AuditError",
+      {}
+    ) {}
+
+    class Create extends Schema.TaggedClass<Create, { readonly _: unique symbol }>()(
+      "Create",
+      {}
+    ) {}
+
+    class Idle extends Schema.TaggedClass<Idle, { readonly _: unique symbol }>()(
+      "Idle",
+      {}
+    ) {}
+
+    class Failed extends Schema.TaggedClass<Failed, { readonly _: unique symbol }>()(
+      "Failed",
+      { reason: Schema.String }
+    ) {}
+
+    const machine = Machine.make({
+      events: [Create],
+      initial: () => new Idle({}),
+      states: [Idle, Failed]
+    })
+      .handlers("Idle")({
+        Create: (_, actions: Machine.ActionQueue<SaveError | AuditError>) => {
+          actions.effect(Effect.fail(new SaveError({ reason: "offline" })))
+          return new Idle({})
+        }
+      })
+      .catch("SaveError", ({ error }) => {
+        expect<typeof error>().type.toBe<SaveError>()
+        return new Failed({ reason: error.reason })
+      })
+
+    expect<Machine.ErrorOf<typeof machine>>().type.toBe<AuditError>()
+  })
+
+  it("recovers all previous errors with catchCause", () => {
+    class SaveError extends Schema.TaggedErrorClass<SaveError, { readonly _: unique symbol }>()(
+      "SaveError",
+      {}
+    ) {}
+
+    class RecoveryError extends Schema.TaggedErrorClass<RecoveryError, { readonly _: unique symbol }>()(
+      "RecoveryError",
+      {}
+    ) {}
+
+    class Create extends Schema.TaggedClass<Create, { readonly _: unique symbol }>()(
+      "Create",
+      {}
+    ) {}
+
+    class Idle extends Schema.TaggedClass<Idle, { readonly _: unique symbol }>()(
+      "Idle",
+      {}
+    ) {}
+
+    const machine = Machine.make({
+      events: [Create],
+      initial: () => new Idle({}),
+      states: [Idle]
+    })
+      .handlers("Idle")({
+        Create: (_, actions: Machine.ActionQueue<SaveError>) => {
+          actions.effect(Effect.fail(new SaveError({})))
+          return new Idle({})
+        }
+      })
+      .catchCause((_, actions: Machine.ActionQueue<RecoveryError, never, any>) => {
+        actions.effect(Effect.fail(new RecoveryError({})))
+        return new Idle({})
+      })
+
+    expect<Machine.ErrorOf<typeof machine>>().type.toBe<RecoveryError>()
+  })
 })
